@@ -1,0 +1,682 @@
+---
+title: TCR affinity dictates functional states of tumor-specific T cells through distinct molecular and epigenetic programs
+#runtime: shiny_prerendered
+output:
+  html_document:
+    code_folding: hide
+    theme: space
+    toc: yes
+    toc_depth: 3
+    toc_float: no
+  BiocStyle::html_document2:
+    code_folding: hide
+    toc: yes
+    toc_float: yes
+  knitrBootstrap::bootstrap_document:
+    highlight.chooser: yes
+    theme.chooser: yes
+  pdf_document:
+    toc: yes
+always_allow_html: yes
+---
+
+
+```{r setup, bootstrap.show.code = FALSE, results='hide', bootstrap.show.message=FALSE, warning=FALSE, cache=TRUE, echo=FALSE, comment=FALSE}
+knitr::opts_chunk$set(bootstrap.show.code = FALSE, message=FALSE, warning=FALSE)
+suppressMessages(library(pheatmap))
+suppressMessages(library(DESeq2))
+suppressMessages(library(edgeR))
+suppressMessages(library(ggplot2))
+suppressMessages(library(VennDiagram))
+suppressMessages(library(kableExtra))
+suppressMessages(library(data.table))
+suppressMessages(library(magrittr))
+suppressMessages(library(gridExtra))
+suppressMessages(library(goseq))
+suppressMessages(library(ggrepel))
+suppressMessages(library(gplots))
+suppressMessages(library(DiffBind))
+suppressMessages(library(RColorBrewer))
+suppressMessages(library(GenomicRanges))
+suppressMessages(library(IRanges))
+suppressMessages(library(ChIPseeker))
+suppressMessages(library(TxDb.Mmusculus.UCSC.mm10.knownGene))
+suppressMessages(library(data.table))
+getOutputFormat <- function() {
+  output <- rmarkdown:::parse_yaml_front_matter(
+    readLines(knitr::current_input())
+    )$output
+  if (is.list(output)){
+    return(names(output)[1])
+  } else {
+    return(output[1])
+  }
+}
+if(getOutputFormat() == 'pdf_document') {
+  knitr::opts_chunk$set(bootstrap.show.code = FALSE, message=FALSE, warning=FALSE, echo=FALSE, results='hide', plots='all')
+}
+tol12qualitative=c("#9e9ac8", "#6a51a3", "#fdbe85", "#fd8d3c", "#d94701", "#74c476", "#41ab5d", "#238b45", "#005a32", "#bdd7e7", "#6baed6", "#2171b5")
+palette <- c("#d94701", "#6a51a3", "#2171b5", "#238b45")
+
+```
+
+## Fig4a
+
+Principle component analysis (PCA) of RNA-seq data. Each point represents a biological replicate.  Top 500 most variable genes based on VS-transformed data.
+
+```{r fig4a, message=FALSE, eval=TRUE, warning=FALSE, cache=TRUE, echo=FALSE, comment=FALSE, results='hide', fig.align="center"}
+counts <- read.table(file = "gene.counts.txt", header = TRUE, check.names=FALSE, row.names=1)
+decoderFile <- "decoder.txt"
+decoder.data <- read.table(decoderFile,header=T,stringsAsFactors=F,sep="\t")
+decoder.data$condition <- factor(decoder.data$group.ID)
+decoder.data$group.ID <-factor(decoder.data$group.ID)
+decoder.data <- decoder.data[decoder.data$sample.ID %in% colnames(counts),]
+counts <- counts[,c(decoder.data$sample.ID)]
+colnames(counts) == decoder.data$sample.ID
+
+
+deseq2.coldata <- data.frame(sample=decoder.data$sample.ID, sex=decoder.data$sex, group=decoder.data$group.ID,batch=decoder.data$batch, row.names = colnames(counts), stringsAsFactors=F)
+deseq2.coldata$group <- factor(decoder.data$group.ID)
+deseq2.cds <- DESeq2::DESeqDataSetFromMatrix(countData = counts,colData = deseq2.coldata, design = ~group)
+deseq2.cds <- estimateSizeFactors(deseq2.cds)
+deseq2.vst <- DESeq2::vst(deseq2.cds)
+ntop = 500
+Pvars <- rowVars(assay(deseq2.vst))
+select <- order(Pvars, decreasing = TRUE)[seq_len(min(ntop, length(Pvars)))]
+PCA <- prcomp(t(assay(deseq2.vst)[select, ]), scale = F)
+percentVar <- round(100*PCA$sdev^2/sum(PCA$sdev^2),1)
+dataGG = data.frame(PC1 = PCA$x[,1], PC2 = PCA$x[,2], sampleName = row.names(colData(deseq2.vst)), condition = colData(deseq2.vst)$group, sex=colData(deseq2.vst)$sex, batch=colData(deseq2.vst)$batch )
+
+
+qplot(PC1, PC2, data = dataGG, fill =condition, shape=condition, size=I(6), label=sampleName, main = "PC1 vs PC2, top 500 variable genes") + labs(x = paste0("PC1, VarExp:", round(percentVar[1],4)), y = paste0("PC2, VarExp:", round(percentVar[2],4))) + theme_classic() + scale_fill_manual(values=c(N=rgb(160,160,164, m=255), E4=rgb(0,0,0, m=255), "LN-D4"= rgb(9,153,99, m=255),"LN-F6"=rgb(0,64,128, m=255),"LN-N4"=rgb(255,80,80, m=255),"T-D4"=rgb(9,153,99, m=255),"T-F6"=rgb(0,64,128, m=255),"T-N4"=rgb(255,80,80, m=255))) +  theme(legend.position="right") + scale_shape_manual(values = c(24,24,24,24,21,21,21,21)) #+ geom_encircle()
+
+```
+
+
+
+## Fig4b
+
+MA plot of RNA-seq data showing differentially expressed genes between high-affinity TIL-N4/F6 and low-affinity TIL-D4.  Padj < 0.10.   Only keeping genes with at least 1 CPM in >= 4 samples.
+
+```{r fig4b, message=FALSE, eval=TRUE, warning=FALSE, cache=TRUE, echo=FALSE, comment=FALSE, results='hide',  fig.align="center"}
+counts <- read.table(file = "gene.counts.txt", header = TRUE, check.names=FALSE, row.names=1)
+decoderFile <- "decoder.txt"
+decoder.data <- read.table(decoderFile,header=T,stringsAsFactors=F,sep="\t")
+decoder.data$condition <- factor(decoder.data$group.ID)
+decoder.data$group.ID <-factor(decoder.data$group.ID)
+decoder.data <- decoder.data[decoder.data$sample.ID %in% colnames(counts),]
+counts <- counts[,c(decoder.data$sample.ID)]
+colnames(counts) == decoder.data$sample.ID
+
+
+cnts <- counts
+conds <- make.names(decoder.data[decoder.data$sample.ID %in% colnames(cnts),]$group.ID)		
+conds[16:19] <- make.names(rep("T-N4_F6", 4))
+conds[5:9] <- make.names(rep("LN-N4_F6", 5))
+conds <- factor(conds)
+library(DESeq2)	
+sampleConditions <- conds	
+deseq2.coldata <- data.frame(condition = sampleConditions, row.names = colnames(cnts))
+deseq2.coldata 
+
+
+deseq2.dds <- DESeq2::DESeqDataSetFromMatrix(countData = cnts, colData = deseq2.coldata, design = ~condition)
+deseq2.dds <- deseq2.dds[ rowSums(cpm(counts(deseq2.dds))>=1) >= 4, ]
+deseq2.dds <- DESeq(deseq2.dds)
+
+deseq2.res <- results(deseq2.dds, contrast=c("condition","T.N4_F6", "T.D4"), alpha=0.10)
+deseq2.res.sig.TN_F6_vs_T.D4_sig <- as.data.frame(subset(deseq2.res , padj < 0.10))
+deseq2.res.sig.TN_F6_vs_T.D4_all <- as.data.frame(deseq2.res)
+
+#genes_to_highlight <- c("Il7r","Runx1","Fas","Tnfrsf22","Tcf7","Klf2","Mapk11","Tnf","Etv1","Id3","Rora","Tet1","Tox","Mafb","Entpd1","Cd244","Cd300a","Hdac9","Il4ra","Tcf7l2","Tcf4","Irf5","Itgae")
+genes_to_highlight <- c("Il7r","Runx1","Fas","Tnfrsf22","Tcf7","Klf2","Mapk11","Tnf","Etv1","Id3","Rora","Tet1","Tox","Mafb","Entpd1","Cd244","Cd300a","Il4ra","Tcf7l2","Tcf4","Irf5","Itgae")
+
+res <- deseq2.res.sig.TN_F6_vs_T.D4_all
+res <- res[with(res, order(log2FoldChange)),]
+res <- res[which(!is.na(res$padj)),]
+res$threshold  <- FALSE
+res[res$padj < 0.10,]$threshold <- TRUE
+res$color <- FALSE
+res[res$padj < 0.10 & res$log2FoldChange > 0,]$color <- "red"
+res[res$padj < 0.10 & res$log2FoldChange < 0,]$color <- "blue"
+res$gene <- row.names(res)
+ggplot(data=res, aes(x=log2(baseMean), y=log2FoldChange, colour=color, label=gene)) +
+    geom_point(alpha=1, size=1.5, show.legend = FALSE) +
+    geom_hline(aes(yintercept = 0), colour = "red", size = 0.45) +
+    ylim( c(-1, 1) * quantile(abs(res$log2FoldChange[is.finite(res$log2FoldChange)]), probs = 0.99) * 1.3) +
+    xlab("Mean expression") +
+    ylab("Log2 FC") +
+     theme_bw(base_size = 16) + theme(legend.position="bottom") +
+     scale_colour_manual(values = c(rgb(173, 222, 173, m=255), "gray80", rgb(255, 183, 183, m=255))) + ggtitle("T.N_T.F6 vs. T.D4 ")  +
+     geom_text_repel(data=data.frame(subset(res[genes_to_highlight[genes_to_highlight %in% row.names(res)],], threshold == TRUE)  ), size=5.5, segment.color="white", color="black", fontface=3) + geom_point(data=subset(res[genes_to_highlight[genes_to_highlight %in% row.names(res)],], threshold == TRUE), shape=1, size=3, color=ifelse(subset(res[genes_to_highlight[genes_to_highlight %in% row.names(res)],], threshold == TRUE)$log2FoldChange > 0, "black", "black"))
+
+
+```
+
+
+
+## Fig4d
+Affinity-dependent (red) and affinity-independent (grey) modules of the tumor-specific T cell dysfunction program. Select genes of each module are highlighted.  Comparison between deseq2.res.sig.TN_F6_vs_T.D4_sig abs(LFC) > 1 and Philip et al. long list.
+
+```{r fig4d, message=FALSE, eval=TRUE, warning=FALSE, cache=TRUE, echo=FALSE, comment=FALSE, results='hide',  fig.align="center"}
+
+gene_sets <- readr:::read_delim("gene_sets.gmx", "\t")
+names(gene_sets) <- toupper(names(gene_sets))
+gene_sets <- as.data.frame(gene_sets)
+gene_sets  <- gene_sets[-1,]
+gene_sets <- gene_sets[,c(1,2,5,6,7,8,9,10, 11, 12)]
+
+plot.new() ; pushViewport(viewport(width=unit(0.8, "npc"), height = unit(0.8, "npc")));
+in1 =  subset(deseq2.res.sig.TN_F6_vs_T.D4_sig, abs(log2FoldChange) >1 )
+draw.pairwise.venn(area1 = nrow(in1), area2 = length(na.omit(c( gene_sets[,1],  gene_sets[,2])) ), cross.area = length(intersect(row.names(in1),  na.omit(c( gene_sets[,1],  gene_sets[,2])))), category = c("TN_F6_vs_T.D4", "Philip long"), fill = c("light green", "light grey"), print.mode = c("raw", "percent"))
+
+```
+
+
+```{r venn_in_philip, message=FALSE, warning=FALSE, cache=TRUE, echo=FALSE, comment=FALSE, context="data"}
+affinity_independent = c("Pdcd1","Lag3","Ctla4","Tigit","Havcr2","Spry1","Spry2","Lef1","Tnfrsf9","Ikzf2","Cd38")[c("Pdcd1","Lag3","Ctla4","Tigit","Havcr2","Spry1","Spry2","Lef1","Tnfrsf9","Ikzf2","Cd38") %in% na.omit(c( gene_sets[,1],  gene_sets[,2]))]
+up <- subset(deseq2.res.sig.TN_F6_vs_T.D4_sig, log2FoldChange > 1)
+down <- subset(deseq2.res.sig.TN_F6_vs_T.D4_sig, log2FoldChange < -1)
+up_in_high <- c("Tox","Cd244","Entpd1","Lyn","Themis2")
+up_in_low <- c("Tcf7","Gzma", "Gzmc", "Gzmm", "Fas","Id3","Il7r","Mapk11","Satb1")
+```
+
+Genes in Philip but not DE in deseq2.res.sig.TN_F6_vs_T.D4_sig include: **`r affinity_independent`**. 
+
+Genes in Philip and up in TN_F6 vs. T.D4 include: **`r up_in_high[up_in_high  %in%  row.names(up)]`**.
+
+Genes in Philip and up in T.D4 vs TN_F6 include: **`r up_in_low[up_in_low  %in%  row.names(down)]`**.
+
+
+
+## Extended Fig4a
+
+Hierarchically clustered RNA-Seq data for genes differentially expressed (log2(fold change; FC)>1, FDR<0.1) in high-affinity (TIL-Hi) vs. low-affinity TIL (TIL-Lo). Naïve TCRTAG are shown as reference. Selected genes within each cluster are shown. 
+
+```{r ext_fig4a, message=FALSE, eval=TRUE, warning=FALSE, cache=TRUE, echo=FALSE, comment=FALSE, results='hide', fig.height=6, fig.width=5, fig.align="center"}
+counts <- read.table(file = "gene.counts.txt", header = TRUE, check.names=FALSE, row.names=1)
+decoderFile <- "decoder.txt"
+decoder.data <- read.table(decoderFile,header=T,stringsAsFactors=F,sep="\t")
+decoder.data$condition <- factor(decoder.data$group.ID)
+decoder.data$group.ID <-factor(decoder.data$group.ID)
+decoder.data <- decoder.data[decoder.data$sample.ID %in% colnames(counts),]
+counts <- counts[,c(decoder.data$sample.ID)]
+colnames(counts) == decoder.data$sample.ID
+
+
+cnts <- counts
+conds <- make.names(decoder.data[decoder.data$sample.ID %in% colnames(cnts),]$group.ID)		
+conds[16:19] <- make.names(rep("T-N4_F6", 4))
+conds[5:9] <- make.names(rep("LN-N4_F6", 5))
+conds <- factor(conds)
+library(DESeq2)	
+sampleConditions <- conds	
+deseq2.coldata <- data.frame(condition = sampleConditions, row.names = colnames(cnts))
+deseq2.coldata 
+
+
+deseq2.dds <- DESeq2::DESeqDataSetFromMatrix(countData = cnts, colData = deseq2.coldata, design = ~condition)
+deseq2.dds <- deseq2.dds[ rowSums(cpm(counts(deseq2.dds))>=1) >= 4, ]
+deseq2.dds <- DESeq(deseq2.dds)
+
+deseq2.res <- results(deseq2.dds, contrast=c("condition","T.N4_F6", "T.D4"), alpha=0.10)
+deseq2.res.sig.TN_F6_vs_T.D4_sig <- as.data.frame(subset(deseq2.res , padj < 0.10))
+deseq2.res.sig.TN_F6_vs_T.D4_all <- as.data.frame(deseq2.res)
+
+cpms <- cpm(counts(deseq2.dds), log=T)
+my_colors = c("green", "black", "red")
+my_colors = colorRampPalette(my_colors)(50)
+
+out = pheatmap(cpms[row.names( subset(deseq2.res.sig.TN_F6_vs_T.D4_sig, abs(log2FoldChange)> 1) ),grep("T-|N[123]", colnames(cpms))], scale="row", fontsize=8, show_rownames=F, color = my_colors, main = "T.N_T.F6 vs. T.D4, padj < 0.10, abs(logFC) > 1", cutree_row=4, silent=T)
+
+genes_in_cluster = as.data.frame(cutree(out$tree_row, k=4)[out$tree_row[["order"]]])
+names(genes_in_cluster) <- "cluster"
+annotation_row = data.frame(cluster = as.character(genes_in_cluster$cluster))
+row.names(annotation_row) <- row.names(genes_in_cluster)
+#pheatmap(cpms[row.names( subset(deseq2.res.sig.TN_F6_vs_T.D4_sig, abs(log2FoldChange)> 1) ),grep("T-|N[123]", colnames(cpms))], scale="row", fontsize=8, show_rownames=F, color = my_colors, main = "T.N_T.F6 vs. T.D4, padj < 0.10, abs(logFC) > 1", cutree_row=4, annotation_row = annotation_row, cluster_cols = F)
+
+
+#  cluster 1 
+#  cluster 4
+#  cluster 3
+#  cluster 2
+
+ordered_row <- c(row.names(subset(annotation_row, cluster == 1)), row.names(subset(annotation_row, cluster == 4)), row.names(subset(annotation_row, cluster == 3)), row.names(subset(annotation_row, cluster == 2)))
+column_order <- c("N3", "N1", "N2", "T-D4-3", "T-D4-2","T-D4-1", "T-N4-2", "T-F6-3", "T-N4-1","T-F6-2")
+pheatmap(cpms[ordered_row, column_order], scale="row", fontsize=8, show_rownames=F, color = my_colors, main = "T.N_T.F6 vs. T.D4, padj < 0.10, abs(logFC) > 1", cutree_row=4, cluster_cols = F, cluster_rows = F, gaps_row = c(226,317,518)) 
+
+
+```
+
+
+## Extended Fig4b
+
+mRNA expression levels of selected genes
+
+```{r ext_fig4b, message=FALSE, eval=T, warning=FALSE, cache=TRUE, echo=FALSE, comment=FALSE, results='hide', fig.height=8, fig.width=8, fig.align="center"}
+counts <- read.table(file = "gene.counts.txt", header = TRUE, check.names=FALSE, row.names=1)
+decoderFile <- "decoder.txt"
+decoder.data <- read.table(decoderFile,header=T,stringsAsFactors=F,sep="\t")
+decoder.data$condition <- factor(decoder.data$group.ID)
+decoder.data$group.ID <-factor(decoder.data$group.ID)
+decoder.data <- decoder.data[decoder.data$sample.ID %in% colnames(counts),]
+counts <- counts[,c(decoder.data$sample.ID)]
+colnames(counts) == decoder.data$sample.ID
+
+
+cnts <- counts
+conds <- make.names(decoder.data[decoder.data$sample.ID %in% colnames(cnts),]$group.ID)		
+conds[16:19] <- make.names(rep("T-N4_F6", 4))
+conds[5:9] <- make.names(rep("LN-N4_F6", 5))
+conds <- factor(conds)
+library(DESeq2)	
+sampleConditions <- conds	
+deseq2.coldata <- data.frame(condition = sampleConditions, row.names = colnames(cnts))
+deseq2.coldata 
+
+
+deseq2.dds <- DESeq2::DESeqDataSetFromMatrix(countData = cnts, colData = deseq2.coldata, design = ~condition)
+deseq2.dds <- deseq2.dds[ rowSums(cpm(counts(deseq2.dds))>=1) >= 4, ]
+
+cpms <- cpm(counts(deseq2.dds), log=T)
+cpm_subset <- cpms[c("Tox", "Themis2", "Entpd1", "Itgae", "Pdcd1", "Ctla4"),]
+decoder.sub <- decoder.data[match(colnames(cpm_subset)[grep("E4", colnames(cpm_subset), invert=T)], decoder.data$sample.ID),]
+row.names(decoder.sub) <- decoder.sub$sample.ID
+decoder.sub <- decoder.sub[c("N1", "N2","N3","LN-D4-1", "LN-D4-2", "LN-F6-1", "LN-F6-2", "LN-N4-1", "LN-N4-2", "LN-N4-3","T-D4-1", "T-D4-2", "T-D4-3", "T-F6-2", "T-F6-3","T-N4-1", "T-N4-2"),]
+cpm_subset <- cpm_subset[,decoder.sub$sample.ID]
+
+cpm_melted <- melt(cpm_subset)
+cpm_melted$group <- as.character(decoder.data[match(cpm_melted$Var2, decoder.data$sample.ID),]$group)
+cpm_melted[grep("LN-D4", cpm_melted$group),]$group <- "dLN.Lo"
+cpm_melted[grep("LN-F6|LN-N4", cpm_melted$group),]$group <- "dLN.Hi"
+cpm_melted[grep("T-D4", cpm_melted$group),]$group <- "TIL.Lo"
+cpm_melted[grep("T-F6|T-N4", cpm_melted$group),]$group <- "TIL.Hi"
+cpm_melted$group <- factor(cpm_melted$group , levels=c("N",  "dLN.Hi","dLN.Lo", "TIL.Hi", "TIL.Lo"))
+ggplot(cpm_melted, aes(x=group, y=value, fill=group)) +   geom_boxplot() + facet_wrap(~Var1, scales = "free") + ylab("log2 CPM")  +theme_bw() + theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+
+cpms <- cpm(counts(deseq2.dds), log=F)
+cpm_subset <- cpms[c("Tox", "Themis2", "Entpd1", "Itgae", "Pdcd1", "Ctla4"),]
+decoder.sub <- decoder.data[match(colnames(cpm_subset)[grep("E4", colnames(cpm_subset), invert=T)], decoder.data$sample.ID),]
+row.names(decoder.sub) <- decoder.sub$sample.ID
+decoder.sub <- decoder.sub[c("N1", "N2","N3","LN-D4-1", "LN-D4-2", "LN-F6-1", "LN-F6-2", "LN-N4-1", "LN-N4-2", "LN-N4-3","T-D4-1", "T-D4-2", "T-D4-3", "T-F6-2", "T-F6-3","T-N4-1", "T-N4-2"),]
+cpm_subset <- cpm_subset[,decoder.sub$sample.ID]
+
+cpm_melted <- melt(cpm_subset)
+cpm_melted$group <- as.character(decoder.data[match(cpm_melted$Var2, decoder.data$sample.ID),]$group)
+cpm_melted[grep("LN-D4", cpm_melted$group),]$group <- "dLN.Lo"
+cpm_melted[grep("LN-F6|LN-N4", cpm_melted$group),]$group <- "dLN.Hi"
+cpm_melted[grep("T-D4", cpm_melted$group),]$group <- "TIL.Lo"
+cpm_melted[grep("T-F6|T-N4", cpm_melted$group),]$group <- "TIL.Hi"
+cpm_melted$group <- factor(cpm_melted$group , levels=c("N",  "dLN.Hi","dLN.Lo", "TIL.Hi", "TIL.Lo"))
+
+
+data_summary <- function(data, varname, groupnames){
+  require(plyr)
+  summary_func <- function(x, col){
+    c(mean = mean(x[[col]], na.rm=TRUE),
+      sd = sd(x[[col]], na.rm=TRUE))
+  }
+  data_sum<-ddply(data, groupnames, .fun=summary_func,
+                  varname)
+  data_sum <- rename(data_sum, c("mean" = varname))
+ return(data_sum)
+}
+
+df2 <- data_summary(cpm_melted, varname="value", groupnames=c("group", "Var1"))
+
+ggplot(df2, aes(x=group, y=value, fill=group)) +   geom_bar(stat="identity") + geom_errorbar(aes(ymin=value-sd, ymax=value+sd), width=.2,position=position_dodge(.9)) + facet_wrap(~Var1, scales = "free") + ylab("CPM") +theme_bw() + theme(axis.text.x = element_text(angle = 90, hjust = 1))
+
+```
+
+
+
+## Extended Fig4d
+Selected gene ontology (GO) terms enriched in genes upregulated in response to high-affinity (red) or low-affinity (green) TCR stimulation in TIL.
+
+```{r extfig4d,  message=FALSE, warning=FALSE, cache=TRUE, echo=FALSE, comment=FALSE, context="data"}
+
+counts <- read.table(file = "gene.counts.txt", header = TRUE, check.names=FALSE, row.names=1)
+decoderFile <- "decoder.txt"
+decoder.data <- read.table(decoderFile,header=T,stringsAsFactors=F,sep="\t")
+decoder.data$condition <- factor(decoder.data$group.ID)
+decoder.data$group.ID <-factor(decoder.data$group.ID)
+decoder.data <- decoder.data[decoder.data$sample.ID %in% colnames(counts),]
+counts <- counts[,c(decoder.data$sample.ID)]
+
+
+cnts <- counts
+conds <- make.names(decoder.data[decoder.data$sample.ID %in% colnames(cnts),]$group.ID)		
+conds[16:19] <- make.names(rep("T-N4_F6", 4))
+conds[5:9] <- make.names(rep("LN-N4_F6", 5))
+conds <- factor(conds)
+library(DESeq2)	
+sampleConditions <- conds	
+deseq2.coldata <- data.frame(condition = sampleConditions, row.names = colnames(cnts))
+
+
+deseq2.dds <- DESeq2::DESeqDataSetFromMatrix(countData = cnts, colData = deseq2.coldata, design = ~condition)
+deseq2.dds <- deseq2.dds[ rowSums(cpm(counts(deseq2.dds))>=1) >= 4, ]
+deseq2.dds <- DESeq(deseq2.dds)
+
+deseq2.res <- results(deseq2.dds, contrast=c("condition","T.N4_F6", "T.D4"), alpha=0.10)
+deseq2.res.sig.TN_F6_vs_T.D4_sig <- as.data.frame(subset(deseq2.res , padj < 0.10))
+deseq2.res.sig.TN_F6_vs_T.D4_all <- as.data.frame(deseq2.res)
+
+
+
+comparison <- "TN_F6_vs_T.D4_sig_posFC_gt0"
+gene.vec <- vector("integer", length= nrow(counts))
+names(gene.vec) <- row.names(counts)
+gene.vec[c(row.names(subset(deseq2.res.sig.TN_F6_vs_T.D4_sig, log2FoldChange > 0)))] <- 1
+file_list <- list.files("./", pattern="*gene.counts$", full.names=TRUE)
+gene.lengths <- read.table(file = file_list[1], header = TRUE, check.names=FALSE, colClasses = c("NULL", "NULL", "NULL", "NULL", "NULL", "integer", "NULL"))
+pwf=goseq::nullp(gene.vec,"mm38","geneSymbol",bias.data=gene.lengths$Length, plot.fit=FALSE)
+GO.wall=goseq(pwf,"mm38","geneSymbol")
+enriched.GO_positive_fc=GO.wall[p.adjust(GO.wall$over_represented_pvalue, method="BH")<.05,]
+row.names(enriched.GO_positive_fc) <- enriched.GO_positive_fc$category
+
+kable(enriched.GO_positive_fc[c("GO:0033554", "GO:0050866", "GO:0042098", "GO:0002683", "GO:0001818"),] , row.names=FALSE,  padding = 0, longtable=TRUE,  caption = "GO terms positive FC (TN_F6_vs_T.D4)") %>%  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+
+
+comparison <- "TN_F6_vs_T.D4_sig_negFC_gt0"
+gene.vec <- vector("integer", length= nrow(counts))
+names(gene.vec) <- row.names(counts)
+gene.vec[c(row.names(subset(deseq2.res.sig.TN_F6_vs_T.D4_sig, log2FoldChange < 0)))] <- 1
+file_list <- list.files("./", pattern="*gene.counts$", full.names=TRUE)
+gene.lengths <- read.table(file = file_list[1], header = TRUE, check.names=FALSE, colClasses = c("NULL", "NULL", "NULL", "NULL", "NULL", "integer", "NULL"))
+pwf=goseq::nullp(gene.vec,"mm38","geneSymbol",bias.data=gene.lengths$Length, plot.fit=FALSE)
+GO.wall=goseq(pwf,"mm38","geneSymbol")
+enriched.GO_negative_fc=GO.wall[p.adjust(GO.wall$over_represented_pvalue, method="BH")<.05,]
+row.names(enriched.GO_negative_fc) <- enriched.GO_negative_fc$category
+kable(enriched.GO_negative_fc[c("GO:0042110", "GO:0030217", "GO:0050852", "GO:0002768", "GO:0001819"),] , row.names=FALSE,  padding = 0, longtable=TRUE,  caption = "GO terms negative FC (TN_F6_vs_T.D4)") %>%  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+
+```
+
+
+
+## Extended Fig4f
+
+Venn diagrams showing the degree of overlap between genes up- or down-regulated in TCRTAG isolated from dLN or tumors (TIL).  LFC > 1 filter, padj < 0.10.
+
+```{r extfig4f_up, message=FALSE, eval=TRUE, warning=FALSE, cache=TRUE, echo=FALSE, comment=FALSE, results='hide',  fig.align="center"}
+
+counts <- read.table(file = "gene.counts.txt", header = TRUE, check.names=FALSE, row.names=1)
+decoderFile <- "decoder.txt"
+decoder.data <- read.table(decoderFile,header=T,stringsAsFactors=F,sep="\t")
+decoder.data$condition <- factor(decoder.data$group.ID)
+decoder.data$group.ID <-factor(decoder.data$group.ID)
+decoder.data <- decoder.data[decoder.data$sample.ID %in% colnames(counts),]
+counts <- counts[,c(decoder.data$sample.ID)]
+colnames(counts) == decoder.data$sample.ID
+
+
+cnts <- counts
+conds <- make.names(decoder.data[decoder.data$sample.ID %in% colnames(cnts),]$group.ID)		
+conds[16:19] <- make.names(rep("T-N4_F6", 4))
+conds[5:9] <- make.names(rep("LN-N4_F6", 5))
+conds <- factor(conds)
+library(DESeq2)	
+sampleConditions <- conds	
+deseq2.coldata <- data.frame(condition = sampleConditions, row.names = colnames(cnts))
+deseq2.coldata 
+
+
+deseq2.dds <- DESeq2::DESeqDataSetFromMatrix(countData = cnts, colData = deseq2.coldata, design = ~condition)
+deseq2.dds <- deseq2.dds[ rowSums(cpm(counts(deseq2.dds))>=1) >= 4, ]
+deseq2.dds <- DESeq(deseq2.dds)
+
+deseq2.res <- results(deseq2.dds, contrast=c("condition","T.N4_F6", "T.D4"), alpha=0.10)
+deseq2.res.sig.TN_F6_vs_T.D4_sig <- as.data.frame(subset(deseq2.res , padj < 0.10))
+deseq2.res.sig.TN_F6_vs_T.D4_all <- as.data.frame(deseq2.res)
+
+
+deseq2.res <- results(deseq2.dds, contrast=c("condition","LN.N4_F6", "LN.D4"), alpha=0.10)
+deseq2.res.sig_LN.N4_F6_vs_LN.D4_sig <- as.data.frame(subset(deseq2.res , padj < 0.10))
+deseq2.res.sig_LN.N4_F6_vs_LN.D4_all <- as.data.frame(deseq2.res)
+
+
+plot.new() ; pushViewport(viewport(width=unit(0.8, "npc"), height = unit(0.8, "npc")));
+in1 = subset(deseq2.res.sig.TN_F6_vs_T.D4_sig, log2FoldChange > 1)
+in2 = subset(deseq2.res.sig_LN.N4_F6_vs_LN.D4_sig, log2FoldChange > 1)
+p1 <- draw.pairwise.venn(area1 = nrow(in1), area2 = nrow(in2), cross.area = length(intersect(row.names(in1), row.names(in2))), category = c("TN_F6_vs_T.D4", "LN.N4_F6_vs_LN.D4"), fill = c("#FE8B8F","#FEB5B6"), print.mode = c("raw", "percent"))
+title("Positive log2FoldChange")
+
+na.pad <- function(x,len){
+    x[1:len]
+}
+
+makePaddedDataFrame <- function(l,...){
+    maxlen <- max(sapply(l,length))
+    data.frame(lapply(l,na.pad,len=maxlen),...)
+}
+
+
+
+```
+
+```{r venn_up_Table, message=FALSE, warning=FALSE, cache=TRUE, echo=FALSE, comment=FALSE, context="data"}
+TIL = c("Tox", "Tcf7l2", "Cd244", "Hdac9", "Etv1")[c("Tox", "Tcf7l2", "Cd244", "Hdac9", "Etv1") %in% row.names(in1)]
+dLN = c("Pdcd1", "Lag3", "Tigit", "Spry1", "Nr4a1", "Bach2")[c("Pdcd1", "Lag3", "Tigit", "Spry1", "Nr4a1", "Bach2") %in% row.names(in2)]
+intersection= c("Lyn", "Themis2", "Entpd1", "Cd300a", "Socs3")[c("Lyn", "Themis2", "Entpd1", "Cd300a", "Socs3") %in% intersect(row.names(in1), row.names(in2))]
+df <- makePaddedDataFrame(list(TIL=TIL,dLN=dLN,intersection=intersection))
+df <- sapply(df, as.character)
+df[is.na(df)] <- " "
+kable( df, row.names=FALSE,  padding = 0, longtable=TRUE,  caption = "Positive log2FoldChange") %>%  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+
+```
+
+```{r extfig4f_down, message=FALSE, eval=TRUE, warning=FALSE, cache=TRUE, echo=FALSE, comment=FALSE, results='hide',  fig.align="center"}
+
+
+
+plot.new() ; pushViewport(viewport(width=unit(0.8, "npc"), height = unit(0.8, "npc")));
+in1 = subset(deseq2.res.sig.TN_F6_vs_T.D4_sig, log2FoldChange < -1)
+in2 = subset(deseq2.res.sig_LN.N4_F6_vs_LN.D4_sig, log2FoldChange < -1)
+p2 <- draw.pairwise.venn(area1 = nrow(in1), area2 = nrow(in2), cross.area = length(intersect(row.names(in1), row.names(in2))), category = c("TN_F6_vs_T.D4", "LN.N4_F6_vs_LN.D4"), fill = c("#8ECDB0", "#AEE0AD"), print.mode = c("raw", "percent"))
+title("Negative log2FoldChange")
+
+
+
+
+```
+
+```{r venn_down_Table, message=FALSE, warning=FALSE, cache=TRUE, echo=FALSE, comment=FALSE, context="data"}
+
+TIL = c("Tcf7", "Runx1", "Klf2", "Il7r", "Nr4a1", "Nr4a3")[c("Tcf7", "Runx1", "Klf2", "Il7r", "Nr4a1", "Nr4a3") %in% row.names(in1)]
+dLN = c("Tcf7l2", "Gzmf")[c("Tcf7l2", "Gzmf") %in% row.names(in2)]
+intersection= c("Gzmc", "Itgae", "Tet1", "Trat1", "Il2") [c("Gzmc", "Itgae", "Tet1", "Trat1", "Il2")  %in% intersect(row.names(in1), row.names(in2))]
+df <- makePaddedDataFrame(list(TIL=TIL,dLN=dLN,intersection=intersection))
+df <- sapply(df, as.character)
+df[is.na(df)] <- " "
+kable( df, row.names=FALSE,  padding = 0, longtable=TRUE,  caption = "Negative log2FoldChange") %>%  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+
+```
+
+
+
+## Extended Fig5a (atac-seq)
+
+
+Fragment length distribution plots (bp on x axis and read count on y axis). 
+
+```{r ext_fig5a, message=FALSE, eval=TRUE, warning=FALSE, cache=TRUE, echo=FALSE, comment=FALSE, results='hide',fig.width=10, fig.height=5.5, fig.align="center"}
+frags.raw <- fread("fragLengthsStats_finalBams.txt")
+frags <- melt(frags.raw, variable.name = "sample", value.name = "fragLength", measure.vars = names(frags.raw))
+frags <- frags[!is.na(fragLength)]
+frags$condition <-  frags$sample %>% gsub("\\-.*","",.) 
+
+ggplot(frags, aes(x = fragLength, fill = condition)) + 
+  geom_histogram(alpha = 0.7,bins = 200) +
+  facet_wrap(condition ~ sample) +
+  scale_x_continuous(breaks = seq(0,1000,150), limits=c(0,1000)) + theme_bw() +xlab("Fragment length (bp)") + ylab("Occurrence") 
+```
+
+
+## Extended Fig5b (atac-seq)
+
+Number of aligned reads per sample, showing the number remaining after mapping and removing duplicated and non-mitochondrial reads. Encode guideline is indicated by the horizontal line.
+
+```{r ext_fig5b, message=FALSE, eval=TRUE, warning=FALSE, cache=TRUE, echo=FALSE, comment=FALSE, results='hide', fig.width=10, fig.height=5.5, fig.align="center"}
+bs.plot <- fread("atac_map_stats.txt")
+bs.plot$category <- factor(bs.plot$category, levels = c("total","mapped","duplicated","scaffolds","mitochondrial", "remaining"), ordered = TRUE)
+ggplot(bs.plot, aes(x = category, y = count/1000000, fill = sample)) + 
+	geom_bar(stat = "identity", position = position_dodge()) +
+	theme(axis.text.x = element_text(angle = 90, hjust = 1)) + 
+	scale_y_continuous(labels=function(n){format(n, scientific = FALSE)})  + theme_bw() +  geom_hline(yintercept=50, size=0.3) + xlab("") + ylab("Reads (Mil)")
+
+
+```
+
+
+
+
+
+
+## Extended Fig6a (atac-seq)
+Number of chromatin accessibility changes in TIL encountering high- vs. low-affinity tumor antigen.
+
+```{r ext_fig6a,  message=FALSE, warning=FALSE, cache=TRUE, echo=FALSE, comment=FALSE, context="data"}
+DB <- readRDS("DB.noXY.RDS")
+T.F6_vs_T.D4_sig <- dba.report(DB, contrast=1, th=0.05, bFlip=T) %>% sortSeqlevels(.) %>% sort(.)
+T.F6_vs_T.D4_sig <- subset(T.F6_vs_T.D4_sig, FDR < 0.05)
+num_peaks_opening <- length(subset(T.F6_vs_T.D4_sig, Fold > 0))
+num_peaks_closing <- length(subset(T.F6_vs_T.D4_sig, Fold < 0))
+df <- data.frame(peaks_opening=num_peaks_opening/10^3, peaks_closing=num_peaks_closing/10^3)
+row.names(df) <- "T.F6_vs_T.D4"
+kable( df, row.names=TRUE,  padding = 0, longtable=TRUE,  caption = "Number of peak changes (x10^3)") %>%  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+
+```
+
+
+## Extended Fig6b (atac-seq)
+Pie chart showing the proportion of reproducible ATAC-Seq peaks in exonic, intronic, intergenic and promoter regions.
+
+
+```{r ext_fig6b,  eval=T,message=FALSE, warning=FALSE, cache=TRUE, echo=FALSE, comment=FALSE, context="data"}
+DB <- readRDS("DB.noXY.RDS")
+
+consensus_peaks <- dba.peakset(DB, bRetrieve=TRUE)
+consensus_peaks_anno <- annotatePeak(consensus_peaks, tssRegion=c(-1000, 1000), TxDb=TxDb.Mmusculus.UCSC.mm10.knownGene, annoDb="org.Mm.eg.db", verbose=F)
+consensus_peaks_anno <- as.GRanges(consensus_peaks_anno)
+consensus_peaks_anno <- sortSeqlevels(consensus_peaks_anno)
+consensus_peaks_anno <- sort(consensus_peaks_anno)
+consensus_peaks_anno <- as.data.frame(consensus_peaks_anno)
+consensus_peaks_anno$basic_annotation <- ""
+consensus_peaks_anno$basic_annotation[grep("Exon|UTR", consensus_peaks_anno$annotation) ] <- "Exon"
+consensus_peaks_anno$basic_annotation[grep("Promoter", consensus_peaks_anno$annotation) ] <- "Promoter"
+consensus_peaks_anno$basic_annotation[grep("Intron", consensus_peaks_anno$annotation) ] <- "Intron"
+consensus_peaks_anno$basic_annotation[grep("Downstream|Intergenic", consensus_peaks_anno$annotation) ] <- "Intergenic"
+
+T.F6_vs_T.D4_sig <- dba.report(DB, contrast=1, th=1, bFlip=T) %>% sortSeqlevels(.) %>% sort(.) %>% as.data.frame(.)
+T.F6_vs_T.D4_sig <- cbind(T.F6_vs_T.D4_sig, consensus_peaks_anno)
+T.F6_vs_T.D4_sig <- subset(T.F6_vs_T.D4_sig, FDR < 0.05)
+
+shared <- data.table(T.F6_vs_T.D4_sig)
+shared <- data.frame(prop.table(table(shared$basic_annotation))*100)
+names(shared) <- c("category", "percent")
+shared$sample <- "T.F6_vs_T.D4"
+
+
+anno.df <- shared
+anno.df <- data.frame(anno.df)
+anno.df$category <- factor(anno.df$category, levels = levels(anno.df$category))
+anno.df$label = paste0(sprintf("%.0f", anno.df$percent), "%")
+
+
+
+
+xlab=""
+ylab="Percentage(%)"
+title="Genomic Feature Distribution"
+
+p <- ggplot(anno.df, aes(x = "", fill = category, y = percent))
+p <- p + geom_bar(stat="identity",  width = 0.4) + theme_classic(base_size=10)
+p <- p +  ggtitle(title) + theme(legend.position="bottom")
+p <- p   + scale_fill_manual(values = c("#F8C71D", "#9EC840", "#16ACE0", "#E47150"))
+p <- p  + geom_text(aes(label = label), position = position_stack(vjust = 0.5), size = 2.5) 
+p <- p  + coord_polar("y", start=0) + facet_wrap(~sample) + theme(axis.text.x=element_blank()) + xlab("") 
+p
+
+
+```
+
+## Extended Fig6c (atac-seq)
+Left, Correlation heatmap of peaks that are differentially accessible (log2(FC)>1, FDR<0.05) between TIL-F6 vs. TIL-D4. Right, heat map of differentially accessible peaks within each cluster. Each row represents one of 16,265 differentially accessible peaks. 
+
+```{r ext_fig6c_left, message=FALSE, eval=TRUE, warning=FALSE, cache=TRUE, echo=FALSE, comment=FALSE, results='hide', fig.height=8, fig.align="center"}
+DB <- readRDS("DB.noXY.RDS")
+hm = R.devices::suppressGraphics({dba.plotHeatmap(DB, correlations=T, mask=DB$masks[[1]], contrast=1)})   
+cols <- rev(colorRampPalette(brewer.pal(10, "RdBu"))(16))
+heatmap.2(hm, col=cols, trace="none", density.info="none")
+```
+
+
+
+
+## Extended Fig6d (atac-seq)
+Heatmap of log2–transformed normalized read counts per regions with differential chromatin accessibility comparing TIL-F6 vs. TIL-D4. Genes associated with the 2 major clusters are highlighted; bolded genes indicate those with associated transcriptional changes. 
+
+
+
+```{r ext_fig6d, message=FALSE, eval=TRUE, warning=FALSE, cache=TRUE, echo=FALSE, comment=FALSE, results='hide', fig.height=8, fig.align="center"}
+DB <- readRDS("DB.noXY.RDS")
+#hm = dba.plotHeatmap(DB, contrast=1, correlations=F,  score=DBA_SCORE_TMM_READS_FULL, scale="row")  
+consensus_peaks <- dba.peakset(DB, bRetrieve=TRUE) 
+T.F6_vs_T.D4_sig <- dba.report(DB, contrast=1, th=0.05, bFlip=T) %>% sortSeqlevels(.) %>% sort(.)
+T.F6_vs_T.D4_sig <- subset(T.F6_vs_T.D4_sig, FDR < 0.05)
+
+count_matrix <- IRanges::subsetByOverlaps(consensus_peaks, T.F6_vs_T.D4_sig)  %>% sortSeqlevels(.) %>% sort(.) %>% as.data.frame(.)
+count_matrix <- as.matrix(count_matrix[,6:16])
+log2_count_matrix <- log2(count_matrix)
+scaled_log2_count_matrix <-t(scale(t(log2_count_matrix)))
+
+cols <- rev(colorRampPalette(brewer.pal(10, "RdBu"))(16))
+
+heatmap.2(scaled_log2_count_matrix, col= cols, trace="none", density.info="none" , scale="none", labRow=FALSE, dendrogram='column', Rowv=TRUE, Colv=TRUE)     
+```
+
+
+
+## Extended Fig6e (atac-seq)
+Selected gene ontology (GO) terms enriched in peaks opened (red) or closed (blue) in response to high-affinity TCR stimulation in TIL.
+
+
+```{r ext_fig6e,message=FALSE, warning=FALSE, cache=TRUE, echo=FALSE, comment=FALSE, context="data"}
+library(rGREAT)
+DB <- readRDS("DB.noXY.RDS")
+T.F6_vs_T.D4_sig <- dba.report(DB, contrast=0.05, th=1, bFlip=T) %>% sortSeqlevels(.) %>% sort(.) %>% as.data.frame(.)
+T.F6_vs_T.D4_sig <- subset(T.F6_vs_T.D4_sig, FDR < 0.05)
+
+consensus_peaks <- dba.peakset(DB, bRetrieve=TRUE) %>% as.data.frame(.)
+bg = data.frame(chr=consensus_peaks$seqnames, start=consensus_peaks$start, end=consensus_peaks$end)
+write.table(bg, "background.bed", sep="\t", quote=F, row.names = F, col.names = F)
+peaks_opening <- subset(T.F6_vs_T.D4_sig, Fold > 0)
+peaks_opening <- peaks_opening[,c("seqnames", "start", "end")]
+names(peaks_opening) <- c("chr", "start", "end")
+job = submitGreatJob(peaks_opening, bg = bg, species = "mm10", request_interval=10, version = '3.0.0')
+tb = getEnrichmentTables(job)
+peaks_opening_bp <- tb[["GO Biological Process"]]
+peaks_opening_bp <- subset(peaks_opening_bp, Hyper_Adjp_BH < 0.05)
+row.names(peaks_opening_bp) <- peaks_opening_bp$ID
+peaks_opening_bp_subset <- peaks_opening_bp[c("GO:0002429", "GO:0046640","GO:0001952","GO:0050850","GO:1901978","GO:0050670","GO:0006986"),]
+kable( peaks_opening_bp_subset, row.names=FALSE,  padding = 0, longtable=TRUE,  caption = "peaks closing") %>%  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+
+Sys.sleep(60)
+
+peaks_closing <- subset(T.F6_vs_T.D4_sig, Fold < 0)
+peaks_closing <- peaks_closing[,c("seqnames", "start", "end")]
+names(peaks_closing) <- c("chr", "start", "end")
+job = submitGreatJob(peaks_closing, bg = bg, species = "mm10", request_interval=10, version = '3.0.0')
+tb = getEnrichmentTables(job)
+peaks_closing_bp <- tb[["GO Biological Process"]]
+peaks_closing_bp <- subset(peaks_closing_bp, Hyper_Adjp_BH < 0.05)
+row.names(peaks_closing_bp) <- peaks_closing_bp$ID
+peaks_closing_bp_subset <- peaks_closing_bp[c("GO:0050896","GO:0001817","GO:0007166","GO:0070098","GO:0002682","GO:0032320","GO:0001913"),]
+kable( peaks_closing_bp_subset, row.names=FALSE,  padding = 0, longtable=TRUE,  caption = "peaks opening") %>%  kable_styling(bootstrap_options = c("striped", "hover", "condensed"))
+
+```
+
+
+
+
