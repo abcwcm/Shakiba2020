@@ -9,6 +9,8 @@ Control cells were naive T cells and normal effector cells.
 Raw data can be downloaded from GEO: SuperSeries GSE141818, including GSE141816 (ATAC-seq data) and GSE141817 (RNA-seq data).
 
 Samples were prepared by Mojdeh Shakiba and the sequencing facility at MSKCC.
+The processing and analyses of the omics data here was performed by Paul Zumbo and Friederike Dündar of the [Applied Bioinformtics Core](https://abc.med.cornell.edu) of Weill Cornell Medicine.
+The code deposited here was primarily written by Paul Zumbo.
 Don't hesitate to [get in touch](https://abc.med.cornell.edu/) with questions related to the code.
 
 ![](WCM_MB_LOGO_HZSS1L_CLR_RGB.png)
